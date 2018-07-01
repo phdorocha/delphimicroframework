@@ -1,5 +1,12 @@
 unit uIBase;
 
+{
+  A conexão usei o ADODB, nada impede de mudar para Firedac, Unidac ou outro.
+  Alterando o tipo de conexão, tudo irá rodar tranquilamente pois o rentorno
+  é em ClientDataSet ou JSON, dái fica fácil usar qualquer conexão alterando
+  Poucas linhas
+}
+
 interface
 
 uses

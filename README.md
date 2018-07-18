@@ -1,2 +1,2 @@
 # delphiframwork
-Micro Framework desenvolvido para facilitar a vida do programador Delphi que prefere trabalhar com Programação Orientada a Objeto.
+Micro Framework desenvolvido para facilitar a vida do programador Delphi com uma classe prática quando o negócio é SQL.

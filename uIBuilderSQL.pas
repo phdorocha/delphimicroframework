@@ -4,7 +4,7 @@ interface
 
 uses
   // Próprias
-  uIBuilderSQL,
+  uIBase,
   // Delphi
   Classes, SysUtils, Generics.Collections, DB, DBClient, Provider, ADODB,
   DBXJSon;
@@ -32,8 +32,8 @@ type
     FKeyField: string;
     cdsTabela: TClientDataSet;
     dsProvider: TDataSetProvider;
-    qryTabela: TADOQuery;
-    FConexao: IProvider;
+    qryTabela: TADOQuery; // Esse componente pode ser modificado dependendo do conector que usar no uIBase.pas
+    FConexao: IProvider; // Objeto da Unit uIBase.pas
 
     function newQuery(Columns: array of string; AWhere: string = ''; AOrderBy: string = ''): String;
     function where(getKeyName: String; sOperator: String = '='; getKey: String = ''): string;

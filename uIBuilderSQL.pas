@@ -26,6 +26,8 @@
   Alteraçoes:
   30/06/18 - Primeira versão publicada
   21/07/18 - Implementação JOINs;
+  29/01/20 - Implementdo retorno em TDataSet (mais baixo nível de DataSet) e melhorado os Wheres podendo por
+    exemplo criar uma cadeia de wheres (Classe.where(field,value).where(field,value).where(field,value).get);.
 
 }
 
@@ -35,10 +37,12 @@ interface
 
 uses
   // Próprias
-  uIBase, Easy.DB.Helper,
+  uIBase,
+  // Rest Dataware
+  uDWConstsData, uRESTDWPoolerDB, uDWAbout, uDWMassiveBuffer, uDWDataset,
   // Delphi
-  Classes, SysUtils, Forms, Generics.Collections, DB, DBClient, Provider,
-  DBXJSon, RTTI;
+  Vcl.Controls, Classes, SysUtils, Generics.Collections, DB, DBClient, Provider,
+  DBXJSon, System.TypInfo, System.Rtti, System.Variants;
 
 { IfThen will return the true string if the value passed in is true, else
   it will return the false string }
@@ -48,58 +52,49 @@ function IfThen(AValue: Boolean; const ATrue: string;
 function IsEmpty(Str: String = ''): Boolean;
 
 type
-  TValidator = class
-    class function Execute(const AModule: string): TDataSet;
-  end;
+  TFieldType = (ftVarChar, ftDate, ftNumber);
 
-  TJoin = Array [0 .. 2] of String;
-
-  IBuilderSQL = interface(IInterface)
-    ['{C38BE0C0-CEA2-4A87-8FAD-CBF54FABC8D6}']
-    // Métodos públicos
-    function TableName: string;
-    function hasOne(AModule, APrimariKey, ALocalKey: string;
-      AdsAtivo: TDataSource): TClientDataSet;
-    function PrimaryKey: string;
-    function All(Columns: Array of string): TClientDataSet;
-    function Get(getKeyName: String; sOperator: String = '=';
-      getKey: String = ''; AOrderBy: string = ''): TClientDataSet;
-    // Métodos privados
-
-    // Propriedades
-
-  end;
-
-  TBuilderSQL = class(TInterfacedObject, IBuilderSQL)
+  TBuilderSQL = class(TComponent)
   private
     FTable: string;
     FKeyField: string;
-    FWith: string;
     cdsTabela: TClientDataSet;
     dsProvider: TDataSetProvider;
     FConexao: IProvider;
-    function newQuery(Columns: array of string; AWhere: string = '';
-      AOrderBy: string = ''): String;
-    function where(getKeyName: String; sOperator: String = '=';
-      getKey: String = ''): string;
-    function hasMany(AModulo, AForkey, ALocalKey: string): string; virtual;
+    FOwner: TComponent;
+
+    function newQuery(Columns: array of string; AWhere: string = ''; AOrderBy: string = ''): String;
+    function swhere(getKeyName: String; sOperator: String = '='; getKey: String = ''): string; overload;
+    function swhere(getKeyName: String; getKey: String = ''): string; overload;
 
   protected
     fillable: TArray<string>;
-    Joins: TList<TJoin>;
+    Columns : TArray<String>;
+    wheres  : TArray<String>;
+    withm: array of string;
     withCount: array of string;
+    rdwTabela: TRESTDWClientSQL;
 
     procedure InitModel; virtual; abstract;
+    procedure rdwTabelaBeforeOpen(DataSet: TDataSet);
+
   public
     Join: array of string;
+    property Conexao: IProvider read FConexao write FConexao;
 
     function TableName: string; virtual;
-    function hasOne(AModule, APrimariKey, ALocalKey: string;
-      AdsAtivo: TDataSource): TClientDataSet; virtual;
     function PrimaryKey: string; virtual;
-    function All(Columns: Array of string): TClientDataSet; virtual;
-    function Get(getKeyName: String; sOperator: String = '=';
-      getKey: String = ''; AOrderBy: string = ''): TClientDataSet; virtual;
+    function All(Columns: array of string): TClientDataSet;
+    function where(getKeyName, sOperator, getKey: String): TRESTDWClientSQL; overload;
+    function where(getKeyName, getKey: String): TRESTDWClientSQL; overload;
+    function where(Column, AOperator: String; AValue: Variant):
+      TBuilderSQL; overload;
+    function get: TDataSet; overload; virtual;
+    function get(AColumns: TArray<String>): TDataSet; overload; virtual;
+    function get(AID: Integer = -1): TRESTDWClientSQL; overload; virtual;
+    function Select(Columns: Array of string): TBuilderSQL; virtual;
+    procedure Save(AObject: TObject); overload;
+    function Save(ArdwSQL: TRestDWClientSQL): TRESTDWClientSQL; overload;
     function JSONDataSet(Columns: array of string): String;
 
     Constructor Create(AOwner: TComponent);
@@ -124,50 +119,72 @@ begin
   Result := Str = EmptyStr;
 end;
 
-function TBuilderSQL.All(Columns: Array of string): TClientDataSet;
+function TBuilderSQL.All(Columns: array of string): TClientDataSet;
 var
   sSQL: String;
 begin
+  Result := NIL;
+
   try
-    // Monta o select com as colunas no parâmetro
+  // Monta o select com as colunas no parâmetro
     if Length(Columns) > 0 then
       sSQL := newQuery(Columns)
     else
       sSQL := newQuery(fillable);
-    FConexao.Query.SQL.CommaText := sSQL;
+
     cdsTabela.CommandText := sSQL;
+    rdwTabela.SQL.Text    := sSQL;
+
     try
-      cdsTabela.Open;
+      rdwTabela.Open;
     except
       On E: Exception do
-        Assert(False, 'Erro :' + E.Message + QuotedStr(self.ClassName)
-            + sLineBreak);
+        Assert(False,'Erro :' + E.Message + sLineBreak + E.ClassName.QuotedString);
     end;
-    Result := cdsTabela;
   finally
 
   end;
+
+  Result := cdsTabela;
 end;
 
-function TBuilderSQL.where(getKeyName, sOperator, getKey: String): string;
+function TBuilderSQL.swhere(getKeyName, sOperator, getKey: String): string;
 begin
   Result := getKeyName + ' ' + sOperator + ' ' + getKey;
 end;
 
+function TBuilderSQL.swhere(getKeyName, getKey: String): string;
+begin
+  Result := getKeyName + ' = ' + getKey;
+end;
+
 constructor TBuilderSQL.Create(AOwner: TComponent);
 begin
-  inherited Create();
+  FOwner := AOwner;
+  FConexao := uIBase.TProvider.Create(AOwner);
+  rdwTabela  := TRESTDWClientSQL.Create(AOwner);
 
-  FConexao := uIBase.TProvider.Create;
-
-  FConexao.Query.Connection := FConexao.Conn;
-  FConexao.Query.Parameters.Clear;
+  with rdwTabela do
+  begin
+    BinaryRequest := True;
+    Params.Clear;
+    DataBase           := FConexao.RDWConn;
+    ActionCursor       := crSQLWait;
+    AutoCommitData     := True;
+    CacheUpdateRecords := not AutoCommitData;
+    ReflectChanges     := True;
+    SequenceField      := PrimaryKey;
+    UpdateTableName    := TableName;
+  end;
 
   dsProvider := TDataSetProvider.Create(AOwner);
-  dsProvider.Name := 'dsProvider';
-  dsProvider.DataSet := FConexao.Query;
-  dsProvider.Options := [poIncFieldProps, poAllowCommandText];
-  dsProvider.UpdateMode := upWhereKeyOnly;
+
+  with dsProvider do
+  begin
+    DataSet := rdwTabela;
+    Options := [poIncFieldProps,poAllowCommandText];
+    UpdateMode := upWhereKeyOnly;
+  end;
 
   cdsTabela := TClientDataSet.Create(NIL);
   cdsTabela.SetProvider(dsProvider);
@@ -182,75 +199,119 @@ begin
     cdsTabela.Free;
   end;
 
+  if rdwTabela <> NIL then
+  begin
+    if rdwTabela.Active then
+      rdwTabela.Close;
+    rdwTabela.Free;
+  end;
+
+  if dsProvider <> NIL then
+    dsProvider.Free;
+
   inherited;
 end;
 
-function TBuilderSQL.Get(getKeyName: String; sOperator: String = '=';
-  getKey: String = ''; AOrderBy: string = ''): TClientDataSet;
+function TBuilderSQL.get: TDataSet;
+begin
+  Result := Self.get(['*']);
+end;
+
+function TBuilderSQL.get(AColumns: TArray<String>): TDataSet;
+var
+  FOriginal: Array of string;
+  cdsResult: TClientDataSet;
+  fillable: TArray<string>;
+  I: Integer;
+begin
+  TArray(FOriginal) := TArray(Self.Columns);
+
+  if Length(AColumns) > 0 then
+  begin
+    SetLength(Self.Columns, Length(AColumns));
+    Self.Columns := AColumns;
+  end else
+    if Length(Self.Columns) <= 0 then
+      Self.Columns := ['*'];
+
+  cdsResult := self.All(Self.Columns);
+  TArray(Self.Columns) := TArray(FOriginal);
+
+  Result := TDataSet(cdsResult);
+end;
+
+function TBuilderSQL.get(AID: Integer): TRESTDWClientSQL;
 var
   sSQL: String;
 begin
   try
-    sSQL := newQuery(fillable, where(getKeyName, sOperator, getKey), AOrderBy);
-    // Monta o select com as colunas no parâmetro
-    if cdsTabela.Active then
-      cdsTabela.Close;
-    FConexao.Query.SQL.CommaText := sSQL;
-    cdsTabela.SetProvider(dsProvider);
-    cdsTabela.CommandText := sSQL;
+    if AID > 0 then
+      sSQL := newQuery(fillable,swhere(PrimaryKey,'=',AID.ToString), PrimaryKey)   // Monsta o select com as colunas no parâmetro
+    else
+      sSQL := newQuery(fillable);   // Monsta o select com as colunas no parâmetro
+
+    if rdwTabela = NIL then
+      rdwTabela := TRESTDWClientSQL.Create(Self);
+
+    rdwTabela.BinaryRequest := True;
+
+    if rdwTabela.Active then
+      rdwTabela.Close;
+
+    if not FConexao.RDWConn.Connected then
+      FConexao.RDWConn.Open;
+
+    with Self.rdwTabela do
+    begin
+      DataBase := FConexao.RDWConn;
+      SQL.Clear;
+      SQL.Text := sSQL;
+      AutoCommitData := True;
+      AutoCalcFields := True;
+      CacheUpdateRecords := not rdwTabela.AutoCommitData;
+      ReflectChanges := True;
+      UpdateTableName := Self.TableName;
+      SequenceField := Self.PrimaryKey;
+    end;
+
     try
-      cdsTabela.Open;
+      rdwTabela.Open;
     except
       On E: Exception do
-        Assert(False, 'Erro :' + E.Message + QuotedStr(self.ClassName)
-            + sLineBreak);
+        Assert(False,'Erro :' + E.Message + QuotedStr(self.ClassName) + sLineBreak);
     end;
-    Result := cdsTabela;
-  except
-    On E: Exception do
-      Assert(False, 'Erro Builder: ' + E.Message + #13 + #10 + QuotedStr(self.ClassName) + sLineBreak);
+  finally
+    if rdwTabela.Active then
+      rdwTabela.Open;
+
+    Result := rdwTabela;
   end;
 end;
 
-function TBuilderSQL.hasMany(AModulo, AForkey, ALocalKey: string): string;
-begin
-
-end;
-
-function TBuilderSQL.hasOne(AModule, APrimariKey, ALocalKey: string;
-  AdsAtivo: TDataSource): TClientDataSet;
-begin
-  Result := self.All(['*']);
-  Result.IndexFieldNames := APrimariKey;
-  Result.MasterFields := ALocalKey;
-  Result.MasterSource := AdsAtivo;
-end;
-
 function TBuilderSQL.JSONDataSet(Columns: array of string): String;
-var
+{var
   sSQL: String;
-  ArrayJSon: TJSONArray;
-  ObjJSon: TJSONObject;
-  strJSon: TJSONString;
-  intJSon: TJSONNumber;
-  TrueJSon: TJSONTrue;
-  FalseJSon: TJSONFalse;
+  ArrayJSon:TJSONArray;
+  ObjJSon:TJSONObject;
+  strJSon:TJSONString;
+  intJSon:TJSONNumber;
+  TrueJSon:TJSONTrue;
+  FalseJSon:TJSONFalse;
   I: Integer;
-  pField: TField;
-begin
-  sSQL := newQuery(Columns); // Monsta o select com as colunas no parâmetro
-  FConexao.Query.SQL.CommaText := sSQL;
-  cdsTabela.CommandText := sSQL;
+  pField: TField;  }
+begin          {
+  sSQL := newQuery(Columns);   // Monsta o select com as colunas no parâmetro
+  rdwTabela.SQL.Text := sSQL;
+  cdsTabela.CommandText   := sSQL;
   try
     cdsTabela.Open;
   except
     On E: Exception do
-      Assert(False, 'Erro :' + E.Message + QuotedStr(self.ClassName)
-          + sLineBreak);
+      Assert(False,'Erro :' + E.Message + QuotedStr(self.ClassName) + sLineBreak);
   end;
 
-  { -- Prepara JSON convert                                                     -- }
-  ArrayJSon := TJSONArray.Create;
+{-- Prepara JSON convert                                                     --}
+{  ArrayJSon:=TJSONArray.Create;
   try
     cdsTabela.First;
     cdsTabela.DisableControls;
@@ -261,104 +322,250 @@ begin
       begin
         case pField.DataType of
           ftAutoInc:
-            begin
-              intJSon := TJSONNumber.Create(pField.AsInteger);
-              ObjJSon.AddPair(pField.FieldName, intJSon);
-            end;
+          begin
+            IntJSon:=TJSONNumber.Create(pField.AsInteger);
+            ObjJSon.AddPair(pField.FieldName,IntJSon);
+          end;
           ftString:
-            begin
-              strJSon := TJSONString.Create(pField.AsString);
-              ObjJSon.AddPair(pField.FieldName, strJSon);
-            end;
+          begin
+            strJSon:=TJSONString.Create(pField.AsString);
+            ObjJSon.AddPair(pField.FieldName,strJSon);
+          end;
           ftWideString:
-            begin
-              strJSon := TJSONString.Create(pField.AsString);
-              ObjJSon.AddPair(pField.FieldName, strJSon);
-            end;
+          begin
+            strJSon:=TJSONString.Create(pField.AsString);
+            ObjJSon.AddPair(pField.FieldName,strJSon);
+          end;
           ftInteger:
-            begin
-              intJSon := TJSONNumber.Create(pField.AsInteger);
-              ObjJSon.AddPair(pField.FieldName, intJSon);
-            end;
+          begin
+            IntJSon:=TJSONNumber.Create(pField.AsInteger);
+            ObjJSon.AddPair(pField.FieldName,IntJSon);
+          end;
           ftBoolean:
-            if pField.AsBoolean then
-            begin
-              TrueJSon := TJSONTrue.Create;
-              ObjJSon.AddPair(pField.FieldName, TrueJSon);
-            end
-            else
-            begin
-              FalseJSon := TJSONFalse.Create;
-              ObjJSon.AddPair(pField.FieldName, FalseJSon);
-            end;
+          if pField.AsBoolean then
+          begin
+            TrueJSon:=TJSONTrue.Create;
+            ObjJSon.AddPair(pField.FieldName,TrueJSon);
+          end else begin
+            FalseJSon:=TJSONFalse.Create;
+            ObjJSon.AddPair(pField.FieldName,FalseJSon);
+          end;
         end;
       end;
       ArrayJSon.AddElement(ObjJSon);
       cdsTabela.Next;
     end;
-    Result := ArrayJSon.ToString;
+    Result:=ArrayJSon.ToString;
   finally
     ArrayJSon.Free;
-  end;
+  end;         }
 end;
 
-function TBuilderSQL.newQuery(Columns: array of string;
-  AWhere, AOrderBy: string): String;
+function TBuilderSQL.newQuery(Columns: array of string; AWhere,
+  AOrderBy: string): String;
 var
   sQuery, Str: String;
   I: Integer;
 begin
   sQuery := 'SELECT ';
 
-  // Atribui as Colunas da tabela
   for I := Low(Columns) to High(Columns) do
   begin
-    if I = 0 then // se primeira coluna, não coloca vírgula
+    if I = 0 then
       sQuery := sQuery + Columns[I]
     else
       sQuery := sQuery + ' ,' + Columns[I];
   end;
 
-  if Length(Self.Join) > 0 then
-  begin
-    self.FWith := ' INNER JOIN ';
-    self.FWith := self.FWith + Self.Join[0];
-    self.FWith := self.FWith + ' ON ' + UpperCase(self.TableName) + '.' + Self.Join[2] + ' = '
-      + Self.Join[0] + '.' + Self.Join[1];
-  end;
+  if Trim(AWhere) = EmptyStr then
+    for I := Low(Wheres) to High(Wheres) do
+    begin
+      if I = 0 then
+        AWhere := AWhere + Wheres[I]
+      else
+        AWhere := AWhere + ' AND ' + Wheres[I];
+    end;
 
-  // Incrementa Tabel, Where, Order By e Join
-  sQuery := UpperCase(Trim(sQuery)) + ' FROM ' + UpperCase(self.TableName)
-    + IfThen(IsEmpty(Trim(FWith)), '', FWith)
-    + IfThen(IsEmpty(Trim(AWhere)), '', ' WHERE ' + UpperCase(Trim(AWhere)))
-    + IfThen(IsEmpty(Trim(AOrderBy)), '', ' ORDER BY ' + AOrderBy);
-
+  sQuery := UpperCase(Trim(sQuery)) + ' FROM ' + UpperCase(self.TableName) + Ifthen(IsEmpty(Trim(AWhere)), '',
+    ' WHERE ' + UpperCase(Trim(AWhere))) + Ifthen(IsEmpty(Trim(AOrderBy)), '', ' ORDER BY ' + AOrderBy);
   Result := Trim(sQuery);
 end;
 
 function TBuilderSQL.PrimaryKey: string;
 begin
-  Assert(False,
-    'A função "PrimaryKey" não foi implementada em ' + QuotedStr
-      (self.ClassName) + sLineBreak);
+  Assert(False, 'A função "PrimaryKey" não foi implementada em ' + QuotedStr(self.ClassName) + sLineBreak);
+end;
+
+procedure TBuilderSQL.rdwTabelaBeforeOpen(DataSet: TDataSet);
+begin
+  inherited;
+
+  if not(PrimaryKey = EmptyStr) then
+    TField(rdwTabela.FieldByName(PrimaryKey)).ProviderFlags := [pfInUpdate,pfInWhere,pfInKey];
+end;
+
+procedure TBuilderSQL.Save(AObject: TObject);
+var
+  FContext: TRttiContext;
+  FProp   : TRttiProperty;
+  SubObj  : TObject;
+  AListProp: TStrings;
+  FType: TRttiType;
+begin
+  FContext  := TRttiContext.Create;
+  AListProp := TStrings.Create;
+  AListProp.BeginUpdate;
+
+  try
+    // Erro aqui
+    FType := FContext.GetType(AObject);
+
+    for FProp in FContext.GetType(AObject.ClassType).GetProperties do
+    begin
+      AListProp.Add(Format('[ %s ]', [FProp.Name]));
+      AListProp.Add(Format('- ClassName : %s', [AObject.QualifiedClassName]));
+      AListProp.Add(Format('- TypeKind  : %s', [GetEnumName(TypeInfo(TTypeKind), Integer(FProp.PropertyType.TypeKind))]));
+      AListProp.Add(Format('- TypeName  : %s', [FProp.PropertyType.Name]));
+      AListProp.Add(Format('- StrValue  : %s', [FProp.GetValue(AObject).ToString]));
+
+      try
+        AListProp.Add(Format('- PropValue : %s', [VarToStr(FProp.GetValue(AObject).AsVariant)]));
+      except
+        // POG   ??
+      end;
+
+      if FProp.PropertyType.TypeKind = tkEnumeration then
+        AListProp.Add(Format('- EnumValue : %s', [GetEnumName(FProp.GetValue(AObject).TypeInfo, FProp.GetValue(AObject).AsOrdinal)]));
+
+      AListProp.Add(Format('- Visibility: %s', [GetEnumName(TypeInfo(TMemberVisibility), Integer(FProp.Visibility))]));
+      AListProp.Add(Format('- IsReadable: %s', [BoolToStr(FProp.IsReadable, True)]));
+      AListProp.Add(Format('- IsWritable: %s', [BoolToStr(FProp.IsWritable, True)]));
+      AListProp.Add('');
+    end;
+  finally
+    AListProp.EndUpdate;
+    FContext.Free;
+  end;
+end;
+
+function TBuilderSQL.Save(ArdwSQL: TRestDWClientSQL): TRESTDWClientSQL;
+var
+  sSQL, sError: String;
+  I: Integer;
+begin
+  sSQL := 'INSERT INTO ' + TableName + ' (';
+
+  for I := 0 to ArdwSQL.FieldCount do
+  begin
+    if I = 0 then
+      sSQL := sSQL + ArdwSQL.Fields[i].FieldName
+    else
+      sSQL := sSQL + ',' + ArdwSQL.Fields[i].FieldName;
+  end;
+
+  sSQL := sSQL + ') VALUES (';
+
+  for I := 0 to ArdwSQL.FieldCount do
+  begin
+    if I = 0 then
+      sSQL := sSQL + ArdwSQL.Fields[i].Value
+    else
+      sSQL := sSQL + ',' + ArdwSQL.Fields[i].Value;
+  end;
+
+  sSQL := sSQL + ')';
+
+  if rdwTabela.Active then
+    rdwTabela.Close;
+
+  rdwTabela.DataBase := FConexao.RDWConn;
+  rdwTabela.SQL.Clear;
+  rdwTabela.SQL.Text := sSQL;
+
+  Assert(rdwTabela.ExecSQL(sError),'Erro :'
+    + sError + sLineBreak
+    + QuotedStr(self.ClassName) + sLineBreak
+  );
+
+  Result := ArdwSQL;
+end;
+
+function TBuilderSQL.Select(Columns: array of string): TBuilderSQL;
+var
+  I: Integer;
+begin
+  if (Length(Columns) >0) then
+  begin
+    SetLength(Self.Columns, Length(Columns));
+
+    for I := 0 to Length(Columns)-1 do
+      Self.Columns[i] := Columns[i];
+  end else
+    Self.Columns := ['*'];
+
+  result := self;
 end;
 
 function TBuilderSQL.TableName: string;
 begin
-  Assert(False,
-    'A função "TableName" não foi implementada em ' + QuotedStr
-      (self.ClassName) + sLineBreak);
+  Assert(False, 'A função "TableName" não foi implementada em ' + QuotedStr(self.ClassName) + sLineBreak);
 end;
 
-{ TValidator }
-
-class function TValidator.Execute(const AModule: string): TDataSet;
-var
-  Obj: IBuilderSQL;
+function TBuilderSQL.where(Column, AOperator: String;
+  AValue: Variant): TBuilderSQL;
 begin
-  Obj := TBuilderSQL.Create(NIL);
+  if Length(Trim(AOperator)) = 0 then
+    AOperator := '=';
 
-  Result := Obj.All(['*']);
+  SetLength(Wheres, Length(Wheres)+1);
+  Wheres[High(Wheres)] := Column +' '+ AOperator +' '+ AValue;
+
+  Result := Self;
+end;
+
+function TBuilderSQL.where(getKeyName, sOperator,
+  getKey: String): TRESTDWClientSQL;
+var
+  sSQL: String;
+begin
+  sSQL := newQuery(fillable,swhere(getKeyName,sOperator,getKey), PrimaryKey);   // Monsta o select com as colunas no parâmetro
+
+  if rdwTabela.Active then
+    rdwTabela.Close;
+
+  rdwTabela.DataBase := FConexao.RDWConn;
+  rdwTabela.SQL.Clear;
+  rdwTabela.SQL.Text := sSQL;
+
+  try
+    rdwTabela.Open;
+  except
+    On E: Exception do
+      Assert(False,'Erro :' + E.Message + QuotedStr(self.ClassName) + sLineBreak);
+  end;
+  Result := rdwTabela;
+end;
+
+function TBuilderSQL.where(getKeyName, getKey: String): TRESTDWClientSQL;
+var
+  sSQL: String;
+begin
+  sSQL := newQuery(fillable,swhere(getKeyName,'=',getKey), PrimaryKey);   // Monsta o select com as colunas no parâmetro
+
+  if rdwTabela.Active then
+    rdwTabela.Close;
+
+  rdwTabela.DataBase := FConexao.RDWConn;
+  rdwTabela.SQL.Clear;
+  rdwTabela.SQL.Text := sSQL;
+
+  try
+    rdwTabela.Open;
+  except
+    On E: Exception do
+      Assert(False,'Erro :' + E.Message + QuotedStr(self.ClassName) + sLineBreak);
+  end;
+  Result := rdwTabela;
 end;
 
 end.

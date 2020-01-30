@@ -1,7 +1,7 @@
 unit uIBase;
 
 {
-  A conexão usei o ADODB, nada impede de mudar para Firedac, Unidac ou outro.
+  A conexão usei o RestDataware, nada impede de mudar Firedac, Unidac ou outro.
   Alterando o tipo de conexão, tudo irá rodar tranquilamente pois o rentorno
   é em ClientDataSet ou JSON, dái fica fácil usar qualquer conexão alterando
   Poucas linhas
@@ -10,7 +10,12 @@ unit uIBase;
 interface
 
 uses
-  SysUtils, Classes, Variants, ADODB, Util, Constants;
+  // Próprias
+  Util, Constants,
+  // RestDataware
+  uDWAbout, uRESTDWPoolerDB, uDWConstsCharset,
+  // Delphi
+  SysUtils, Classes, Variants;
 
 type
   TField = class
@@ -68,7 +73,7 @@ type
 
   TTabelaBase = class(TInterfacedObject, ITabela)
     private
-      FoConn  : TADOConnection;
+      FoConn  : TRESTDWDataBase;
       FcTabela: string;
       FoLista : TList;
       FoMaster: ITabela;
@@ -80,7 +85,7 @@ type
       function get_Master: ITabela; virtual;
       procedure set_Master(Value: ITabela); virtual;
 
-      constructor Create(Conn: TADOConnection; Tabela: string); virtual;
+      constructor Create(AConn: TRESTDWDataBase; Tabela: string); virtual;
 
       // para master detail
       property MasterTable: ITabela read get_Master write set_Master;
@@ -91,7 +96,7 @@ type
       procedure Assign(loObj: ITabela);
       function FieldByName(lcField: string): TField;
 
-      property Conn: TADOConnection read FoConn;
+      property Conn: TRESTDWDataBase read FoConn;
 
   end;
 
@@ -100,27 +105,32 @@ type
     function Update: boolean;
     function Delete: boolean;
 
-    function get_conn: TADOConnection;
-    procedure set_conn(value: TADOConnection);
-
+    function  get_rdwconn: TRESTDWDataBase;
+    procedure set_rdwconn(const Value: TRESTDWDataBase);
     function  get_ITable: ITabela;
     procedure set_ITable(Value: ITabela);
+    function  get_Qeury: TRestDWClientSQL;
+    procedure set_Query(const Value: TRestDWClientSQL);
 
-    property Conn: TADOConnection read get_conn write set_conn;
-    property Table: ITabela read get_ITable write set_ITable;
+    property RDWConn: TRESTDWDataBase  read get_rdwconn write set_rdwconn;
+    property Table  : ITabela          read get_ITable  write set_ITable;
+    property Query  : TRestDWClientSQL read get_Qeury   write set_Query;
   end;
 
   TProvider = class(TInterfacedObject, IProvider)
     private
-      FoConn: TADOConnection;
-      FoTabela: ITabela;
+      FoRDWConn: TRESTDWDataBase;
+      FoTabela : ITabela;
+      FOwner   : TComponent;
+      FQuery   : TRestDWClientSQL;
 
     protected
-      function get_conn: TADOConnection;
-      procedure set_conn(value: TADOConnection);
-
+      function  get_rdwconn: TRESTDWDataBase;
+      procedure set_rdwconn(const Value: TRESTDWDataBase);
       function  get_ITable: ITabela; virtual;
       procedure set_ITable(Value: ITabela); virtual;
+      function  get_Qeury: TRestDWClientSQL;
+      procedure set_Query(const Value: TRestDWClientSQL);
 
       function doInsert: boolean; virtual; abstract;
       function doUpdate: boolean; virtual; abstract;
@@ -131,10 +141,11 @@ type
       function Update: boolean; virtual;
       function Delete: boolean; virtual;
 
-      property Conn: TADOConnection read get_conn write set_conn;
-      property Table: ITabela read get_ITable write set_ITable;
+      property RDWConn: TRESTDWDataBase  read get_rdwconn write set_rdwconn;
+      property Table  : ITabela          read get_ITable  write set_ITable;
+      property Query  : TRestDWClientSQL read get_Qeury   write set_Query;
 
-      Constructor Create;
+      Constructor Create(AOwner: TComponent);
       Destructor Destroy; override;
   end;
 
@@ -142,21 +153,53 @@ implementation
 
 { TProvider }
 
-constructor TProvider.Create;
+constructor TProvider.Create(AOwner: TComponent);
 begin
   inherited Create;
 
-  FoConn := TADOConnection.Create(NIL);
-  FoConn.LoginPrompt := False;
-  FoConn.ConnectionString :=
-    'Provider=SQLOLEDB.1;'
-    +'Persist Security Info=True;'
-    +'User ID='+TUtil.ReadIni(TUtil.IniFileServer, INI_SESSAO_CONEXAO, INI_ONLOGIN)+';'
-    +'Password='+TUtil.Criptografar(TUtil.ReadIni(TUtil.IniFileServer, INI_SESSAO_CONEXAO, INI_ONSENHA))+';'
-    +'Initial Catalog=base;'
-    +'Data Source='+TUtil.ReadIni(TUtil.IniFileServer, INI_SESSAO_CONEXAO, INI_SERVER);
-  FoConn.Provider := 'SQLOLEDB.1';
-  FoConn.Open;
+{-- Conexão Rest Dataware ---------------------------------------------------}
+  self.RDWConn := TRESTDWDataBase.Create(AOwner);
+
+  if (TUtil.ReadIni(TUtil.IniFileServer, INI_SESSAO_CONEXAO, INI_PROXY_PORTA) = '') then
+    TUtil.WriteIniBoo(TUtil.IniFileServer, INI_SESSAO_CONEXAO, INI_PROXY, False);
+
+  if (TUtil.ReadIni(TUtil.IniFileServer, INI_SESSAO_CONEXAO, INI_REQUESTTIMEOUT) = '') then
+    TUtil.WriteIni(TUtil.IniFileServer, INI_SESSAO_CONEXAO, INI_REQUESTTIMEOUT, '9999999');
+
+  with self.RDWConn do
+  begin
+    Compression                 := False;
+    MyIP                        := TUtil.ReadIni(TUtil.IniFileServer, INI_SESSAO_CONEXAO, INI_SERVICO);
+    Login                       := TUtil.ReadIni(TUtil.IniFileServer, INI_SESSAO_CONEXAO, INI_USUARIODW);
+    Password                    := TUtil.Criptografar(TUtil.ReadIni(TUtil.IniFileServer, INI_SESSAO_CONEXAO, INI_SENHADW));
+    Proxy                       := TUtil.ReadIniInt(TUtil.IniFileServer, INI_SESSAO_CONEXAO, INI_PROXY).ToBoolean;
+    ProxyOptions.Port           := TUtil.ReadIniInt(TUtil.IniFileServer, INI_SESSAO_CONEXAO, INI_PROXY_PORTA);
+    PoolerService               := TUtil.ReadIni(TUtil.IniFileServer, INI_SESSAO_CONEXAO, INI_SERVICO);
+    PoolerPort                  := TUtil.ReadIniInt(TUtil.IniFileServer, INI_SESSAO_CONEXAO, INI_PORTA);
+    PoolerName                  := 'TServerMethodDM.RESTDWPoolerDB1';
+    StateConnection.AutoCheck   := False;
+    StateConnection.InTime      := 1000;
+    RequestTimeOut              := TUtil.ReadIniInt(TUtil.IniFileServer, INI_SESSAO_CONEXAO, INI_REQUESTTIMEOUT);
+    EncodeStrings               := False;
+    Encoding                    := TEncodeSelect.esUtf8;
+    StrsEmpty2Null              := False;
+    StrsTrim                    := False;
+    StrsTrim2Len                := False;
+    ParamCreate                 := False;
+    ClientConnectionDefs.Active := False;
+  end;
+
+  try
+    RDWConn.Open;
+  except
+    On E: Exception do
+      Assert(False,
+        'Erro de conexão ao SiD Servidor de Dados!' + sLineBreak +
+        'ERRO: ' + E.Message + sLineBreak +
+        'Classe: ' + Self.ClassName.QuotedString
+      );
+  end;
+{-- FIM Conexão Rest Dataware ---------------------------------------------------}
 end;
 
 function TProvider.Delete: boolean;
@@ -166,16 +209,12 @@ end;
 
 destructor TProvider.Destroy;
 begin
-  if Conn.Connected then
-    Conn.Close;
-  Conn.Free;
+  if Self.RDWConn.Connected then
+    Self.RDWConn.Close;
+
+  Self.RDWConn.Free;
 
   inherited;
-end;
-
-function TProvider.get_conn: TADOConnection;
-begin
-  result := FoConn;
 end;
 
 function TProvider.get_ITable: ITabela;
@@ -183,11 +222,22 @@ begin
   result := FoTabela;
 end;
 
+function TProvider.get_Qeury: TRestDWClientSQL;
+begin
+  result := FQuery;
+end;
+
+function TProvider.get_rdwconn: TRESTDWDataBase;
+begin
+  Result := FoRDWConn;
+end;
+
 function TProvider.Insert: boolean;
 begin
   try
     if not Table.canInsert then
       raise Exception.Create('Parâmetros insuficientes!');
+
     result := doInsert;
   except
     on e: exception do
@@ -197,14 +247,19 @@ begin
   end;
 end;
 
-procedure TProvider.set_conn(value: TADOConnection);
-begin
-  FoConn := value;
-end;
-
 procedure TProvider.set_ITable(Value: ITabela);
 begin
   FoTabela := Value;
+end;
+
+procedure TProvider.set_Query(const Value: TRestDWClientSQL);
+begin
+  FQuery := Value;
+end;
+
+procedure TProvider.set_rdwconn(const Value: TRESTDWDataBase);
+begin
+  FoRDWConn := Value;
 end;
 
 function TProvider.Update: boolean;
@@ -228,10 +283,11 @@ begin
   end;
 end;
 
-constructor TTabelaBase.Create(Conn: TADOConnection; Tabela: string);
+constructor TTabelaBase.Create(AConn: TRESTDWDataBase; Tabela: string);
 begin
   inherited Create;
-  FoConn := Conn;
+
+  FoConn := AConn;
   FcTabela := Tabela;
   FoLista := TList.Create;
 end;
@@ -245,6 +301,7 @@ begin
     TField(FoLista[I]).Free;
     FoLista[I] := nil;
   end;
+
   FoLista.Pack;
 
   inherited;
@@ -255,6 +312,7 @@ var
   I: Integer;
 begin
   result := nil;
+
   for I := 0 to FoLista.Count - 1 do
     if UpperCase(TField(FoLista[i]).Name) = UpperCase(lcField) then
     begin
@@ -278,6 +336,7 @@ end;
 constructor TField.Create(Field: string);
 begin
   inherited Create;
+
   FcName := Field;
 end;
 
